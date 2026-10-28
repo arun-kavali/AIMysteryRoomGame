@@ -1,0 +1,26 @@
+{
+  "name": "ai-mystery-room",
+  "version": "1.0.0",
+  "private": true,
+  "description": "AI-Powered Interactive Mystery Investigation Web Application",
+  "scripts": {
+    "dev": "npm --prefix client run dev",
+    "build": "npm --prefix client run build",
+    "client": "npm --prefix client run dev",
+    "server": "npm --prefix server run dev",
+    "server:start": "npm --prefix server run start",
+    "test:server": "npm --prefix server test"
+  },
+  "keywords": [
+    "ai",
+    "mystery",
+    "react",
+    "tailwind",
+    "vite",
+    "express",
+    "mongodb",
+    "gemini"
+  ],
+  "author": "",
+  "license": "ISC"
+}
