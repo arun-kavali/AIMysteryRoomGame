@@ -26,9 +26,8 @@ dist-ssr
 
 # Environment variables
 .env
-.env.production
+.env.*
 .env.local
-
-
-.env*
+.env.production
 !.env.example
+!**/.env.example

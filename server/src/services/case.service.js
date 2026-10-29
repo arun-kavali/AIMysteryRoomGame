@@ -9,7 +9,7 @@ function ensureDatabaseReady() {
   if (mongoose.connection.readyState !== 1) {
     throw new HttpError(
       503,
-      'Database service is currently unavailable.',
+      'Database service is currently unavailable. Operation could not be completed.',
       'DATABASE_UNAVAILABLE'
     );
   }
@@ -63,18 +63,54 @@ export async function getCaseById(caseId) {
 
 /**
  * Discovers a clue for an active case.
- * Prevents duplicate discovery points and rejects completed cases.
+ * Uses atomic conditional update to guarantee that concurrent discovery requests
+ * cannot duplicate clue IDs or double-award points.
  */
 export async function discoverClue(caseId, clueId) {
   ensureValidObjectId(caseId);
   ensureDatabaseReady();
 
-  const caseDoc = await Case.findById(caseId);
-  if (!caseDoc) {
+  // Attempt atomic conditional insertion:
+  // Must match active case, clue must exist in clues array, and clue must NOT already be in discoveredClueIds
+  const updatedDoc = await Case.findOneAndUpdate(
+    {
+      _id: caseId,
+      status: 'active',
+      'clues.id': clueId,
+      discoveredClueIds: { $ne: clueId },
+    },
+    {
+      $addToSet: { discoveredClueIds: clueId },
+    },
+    { new: true }
+  );
+
+  // If successfully updated atomically, clue was newly discovered
+  if (updatedDoc) {
+    const targetClue = updatedDoc.clues.find((c) => c.id === clueId);
+    return {
+      clue: {
+        id: targetClue.id,
+        title: targetClue.title,
+        description: targetClue.description,
+        relevance: targetClue.relevance,
+        alreadyDiscovered: false,
+      },
+      pointsEarned: 5,
+      progress: {
+        discoveredCount: updatedDoc.discoveredClueIds.length,
+        totalClues: updatedDoc.clues.length,
+      },
+    };
+  }
+
+  // If atomic update did not match, inspect current case state to return exact, safe status
+  const currentCase = await Case.findById(caseId);
+  if (!currentCase) {
     throw new HttpError(404, `Case with ID ${caseId} was not found`, 'CASE_NOT_FOUND');
   }
 
-  if (caseDoc.status === 'completed') {
+  if (currentCase.status === 'completed') {
     throw new HttpError(
       409,
       'Cannot discover clues on an already completed case.',
@@ -82,7 +118,7 @@ export async function discoverClue(caseId, clueId) {
     );
   }
 
-  const targetClue = caseDoc.clues.find((c) => c.id === clueId);
+  const targetClue = currentCase.clues.find((c) => c.id === clueId);
   if (!targetClue) {
     throw new HttpError(
       404,
@@ -91,43 +127,72 @@ export async function discoverClue(caseId, clueId) {
     );
   }
 
-  const alreadyDiscovered = caseDoc.discoveredClueIds.includes(clueId);
-
-  if (!alreadyDiscovered) {
-    caseDoc.discoveredClueIds.push(clueId);
-    await caseDoc.save();
-  }
-
+  // If clue was already discovered (e.g. concurrent or duplicate request)
   return {
     clue: {
       id: targetClue.id,
       title: targetClue.title,
       description: targetClue.description,
       relevance: targetClue.relevance,
-      alreadyDiscovered,
+      alreadyDiscovered: true,
     },
-    pointsEarned: alreadyDiscovered ? 0 : 5,
+    pointsEarned: 0,
     progress: {
-      discoveredCount: caseDoc.discoveredClueIds.length,
-      totalClues: caseDoc.clues.length,
+      discoveredCount: currentCase.discoveredClueIds.length,
+      totalClues: currentCase.clues.length,
     },
   };
 }
 
 /**
  * Reveals the next available hint for an active case.
- * Enforces difficulty hint allowance and prevents repeat consumption.
+ * Uses atomic conditional update ($expr $lt) to prevent concurrent requests
+ * from exceeding the allowed hint allowance.
  */
 export async function useHint(caseId) {
   ensureValidObjectId(caseId);
   ensureDatabaseReady();
 
-  const caseDoc = await Case.findById(caseId);
-  if (!caseDoc) {
+  // Atomically increment usedHintCount only if case is active and usedHintCount < hints.length
+  const updatedDoc = await Case.findOneAndUpdate(
+    {
+      _id: caseId,
+      status: 'active',
+      $expr: { $lt: ['$usedHintCount', { $size: '$hints' }] },
+    },
+    {
+      $inc: { usedHintCount: 1 },
+    },
+    { new: true }
+  );
+
+  // Successfully incremented atomically
+  if (updatedDoc) {
+    const revealedIndex = updatedDoc.usedHintCount - 1;
+    const hintText = updatedDoc.hints[revealedIndex];
+    return {
+      hint: {
+        id: `hint_${revealedIndex + 1}`,
+        number: revealedIndex + 1,
+        text: hintText,
+      },
+      hintsProgress: {
+        used: updatedDoc.usedHintCount,
+        total: updatedDoc.hints.length,
+        remaining: Math.max(0, updatedDoc.hints.length - updatedDoc.usedHintCount),
+      },
+      penaltyIncurred: 10,
+      totalHintPenalty: updatedDoc.usedHintCount * 10,
+    };
+  }
+
+  // If atomic update failed, determine exact reason
+  const currentCase = await Case.findById(caseId);
+  if (!currentCase) {
     throw new HttpError(404, `Case with ID ${caseId} was not found`, 'CASE_NOT_FOUND');
   }
 
-  if (caseDoc.status === 'completed') {
+  if (currentCase.status === 'completed') {
     throw new HttpError(
       409,
       'Cannot request hints on an already completed case.',
@@ -135,41 +200,18 @@ export async function useHint(caseId) {
     );
   }
 
-  const totalHints = caseDoc.hints.length;
-  if (caseDoc.usedHintCount >= totalHints) {
-    throw new HttpError(
-      409,
-      'All available hints for this case have already been revealed.',
-      'NO_HINTS_REMAINING'
-    );
-  }
-
-  const nextHintIndex = caseDoc.usedHintCount;
-  const hintText = caseDoc.hints[nextHintIndex];
-
-  // Atomically advance used hint counter
-  caseDoc.usedHintCount += 1;
-  await caseDoc.save();
-
-  return {
-    hint: {
-      id: `hint_${nextHintIndex + 1}`,
-      number: nextHintIndex + 1,
-      text: hintText,
-    },
-    hintsProgress: {
-      used: caseDoc.usedHintCount,
-      total: totalHints,
-      remaining: totalHints - caseDoc.usedHintCount,
-    },
-    penaltyIncurred: 10,
-    totalHintPenalty: caseDoc.usedHintCount * 10,
-  };
+  throw new HttpError(
+    409,
+    'All available hints for this case have already been revealed.',
+    'NO_HINTS_REMAINING'
+  );
 }
 
 /**
- * Submits player accusation, calculates authoritative server-side score,
- * and marks the case completed.
+ * Submits player accusation.
+ * Calculates authoritative score on server and uses an atomic conditional transition
+ * ({ status: 'active' } -> { status: 'completed' }) to ensure that only ONE final accusation
+ * can ever be recorded.
  */
 export async function submitAccusation(caseId, { suspectId, reasoning = '' }) {
   ensureValidObjectId(caseId);
@@ -206,21 +248,42 @@ export async function submitAccusation(caseId, { suspectId, reasoning = '' }) {
     hintsUsedCount: caseDoc.usedHintCount,
   });
 
-  caseDoc.status = 'completed';
-  caseDoc.accusedSuspectId = suspectId;
-  caseDoc.accusationReasoning = reasoning.trim();
-  caseDoc.isCorrect = isCorrect;
-  caseDoc.score = scoreBreakdown.finalScore;
-  caseDoc.completedAt = new Date();
+  const now = new Date();
 
-  await caseDoc.save();
+  // Atomic state transition from 'active' to 'completed'
+  const completedDoc = await Case.findOneAndUpdate(
+    {
+      _id: caseId,
+      status: 'active',
+    },
+    {
+      $set: {
+        status: 'completed',
+        accusedSuspectId: suspectId,
+        accusationReasoning: reasoning.trim(),
+        isCorrect,
+        score: scoreBreakdown.finalScore,
+        completedAt: now,
+      },
+    },
+    { new: true }
+  );
 
-  const culpritSuspect = caseDoc.suspects.find(
-    (s) => s.id === caseDoc.solution.culpritSuspectId
+  // If another concurrent request completed the case first:
+  if (!completedDoc) {
+    throw new HttpError(
+      409,
+      'An accusation has already been submitted for this case. Completed cases cannot be altered.',
+      'CASE_ALREADY_COMPLETED'
+    );
+  }
+
+  const culpritSuspect = completedDoc.suspects.find(
+    (s) => s.id === completedDoc.solution.culpritSuspectId
   );
 
   return {
-    caseId: caseDoc._id.toString(),
+    caseId: completedDoc._id.toString(),
     status: 'completed',
     isCorrect,
     accusedSuspect: {
@@ -229,15 +292,15 @@ export async function submitAccusation(caseId, { suspectId, reasoning = '' }) {
       role: accusedSuspect.role,
     },
     culprit: {
-      id: culpritSuspect?.id || caseDoc.solution.culpritSuspectId,
+      id: culpritSuspect?.id || completedDoc.solution.culpritSuspectId,
       name: culpritSuspect?.name || 'Unknown',
       role: culpritSuspect?.role || '',
     },
-    explanation: caseDoc.solution.explanation,
-    reasoningClueIds: caseDoc.solution.reasoningClueIds,
+    explanation: completedDoc.solution.explanation,
+    reasoningClueIds: completedDoc.solution.reasoningClueIds,
     score: scoreBreakdown.finalScore,
     scoreBreakdown,
-    completedAt: caseDoc.completedAt,
+    completedAt: completedDoc.completedAt,
   };
 }
 

@@ -181,7 +181,7 @@ export default function ResultsPage() {
                 Your Score
               </span>
               <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-blue-50 text-primary">
-                Official Verdict
+                Authoritative Server Verdict
               </span>
             </div>
 

@@ -8,23 +8,35 @@ import { errorHandler } from './middleware/error-handler.js';
 
 const app = express();
 
-// Determine allowed origins for CORS
-const allowedOrigins = env.CLIENT_URL
+// Parse configured allowed origins from CLIENT_URL
+const configuredOrigins = env.CLIENT_URL
   ? env.CLIENT_URL.split(',').map((url) => url.trim().replace(/\/$/, ''))
-  : ['*'];
+  : [];
+
+// Development fallback origins (only active in non-production)
+const devOrigins = ['http://localhost:5173', 'http://127.0.0.1:5173'];
+
+const allowedOrigins = new Set([
+  ...configuredOrigins,
+  ...(env.NODE_ENV !== 'production' ? devOrigins : []),
+]);
 
 app.use(
   cors({
     origin: (origin, callback) => {
-      // Allow requests with no origin (e.g. mobile apps, curl, or local scripts)
-      if (!origin || allowedOrigins.includes('*') || allowedOrigins.includes(origin)) {
+      // Allow requests with no origin (e.g. mobile apps, curl, server-to-server health probes)
+      if (!origin) {
         return callback(null, true);
       }
-      // Allow official Vercel preview and production deployments
-      if (origin.endsWith('.vercel.app')) {
+
+      // Check against explicit allowed origin set
+      if (allowedOrigins.has('*') || allowedOrigins.has(origin)) {
         return callback(null, true);
       }
-      return callback(new Error(`Origin ${origin} not allowed by CORS`));
+
+      return callback(
+        new Error(`Origin '${origin}' is not authorized by the backend CORS configuration.`)
+      );
     },
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization'],

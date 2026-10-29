@@ -264,10 +264,13 @@ export default function InvestigationPage() {
 
             <div className="text-right">
               <div className="text-[11px] font-semibold text-secondary uppercase tracking-wider">
-                Investigation Points
+                Live Point Estimate
               </div>
               <div className="text-xl sm:text-2xl font-black text-navy-900">
                 {currentInvestigativeScore}
+              </div>
+              <div className="text-[10px] text-slate-400 mt-0.5">
+                Pre-verdict estimate
               </div>
             </div>
           </div>
